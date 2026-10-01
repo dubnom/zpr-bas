@@ -86,13 +86,15 @@ type SharedState = Arc<RwLock<AppState>>;
 struct AppState {
     auths: HashMap<String, AuthRecord>, // client_id
     db: FsDb,
+    token_signing_key: Vec<u8>,
 }
 
 impl AppState {
-    fn new(db: FsDb) -> Self {
+    fn new(db: FsDb, token_signing_key: Vec<u8>) -> Self {
         AppState {
             auths: HashMap::new(),
             db,
+            token_signing_key,
         }
     }
 }
@@ -125,8 +127,10 @@ impl AccessTokenResponse {
     }
 }
 
-pub async fn start_server(key_file: &Path, cert_file: &Path, db: FsDb) {
-    let shared_state = Arc::new(RwLock::new(AppState::new(db)));
+pub async fn start_server(key_file: &Path, cert_file: &Path, token_key_file: &Path, db: FsDb) {
+    let token_signing_key = crate::token::load_signing_key(token_key_file)
+        .unwrap_or_else(|e| panic!("failed to load BAS token signing key: {e}"));
+    let shared_state = Arc::new(RwLock::new(AppState::new(db, token_signing_key)));
     tokio::spawn(start_vs_server(
         native_tls_acceptor(key_file, cert_file),
         3999,
@@ -458,6 +462,7 @@ async fn authenticate_adapter(
     };
 
     let mut token: Option<String> = None;
+    let token_signing_key = state.token_signing_key.clone();
 
     let location = match state.auths.get_mut(&payload.client_id) {
         Some(rec) => {
@@ -499,7 +504,7 @@ async fn authenticate_adapter(
                 } else {
                     // The code is secret and only for one time use and should be kept in memory only.
                     let code = create_authorization_code();
-                    let tok = create_token(&payload.client_id, &attrs);
+                    let tok = create_token(&payload.client_id, &attrs, &token_signing_key);
                     rec.token = Some(tok.clone());
                     token = Some(tok);
                     rec.code = Some(format!("{code}"));
@@ -543,11 +548,20 @@ mod tests {
     use tempfile;
     use tower::ServiceExt;
 
+    const TEST_TOKEN_SIGNING_KEY: &[u8] = b"test-only BAS JWT signing key with enough entropy";
+
+    fn test_state(db: FsDb) -> SharedState {
+        Arc::new(RwLock::new(AppState::new(
+            db,
+            TEST_TOKEN_SIGNING_KEY.to_vec(),
+        )))
+    }
+
     #[tokio::test]
     async fn test_authrequest_adapter_no_client() {
         let tempdir = tempfile::tempdir().unwrap();
         let dbpath = tempdir.path().join("db");
-        let shared_state = Arc::new(RwLock::new(AppState::new(FsDb::new(&dbpath).unwrap())));
+        let shared_state = test_state(FsDb::new(&dbpath).unwrap());
 
         let app = adapter_app(shared_state.clone());
 
@@ -570,7 +584,7 @@ mod tests {
     async fn test_authrequest_adapter_creates_nonce() {
         let tempdir = tempfile::tempdir().unwrap();
         let dbpath = tempdir.path().join("db");
-        let shared_state = Arc::new(RwLock::new(AppState::new(FsDb::new(&dbpath).unwrap())));
+        let shared_state = test_state(FsDb::new(&dbpath).unwrap());
 
         let key = CnKey::from_str("foo.bar").unwrap();
         let db = FsDb::new(&dbpath).unwrap();
@@ -603,7 +617,7 @@ mod tests {
     async fn test_authenticate_adapter_bad_nonce() {
         let tempdir = tempfile::tempdir().unwrap();
         let dbpath = tempdir.path().join("db");
-        let shared_state = Arc::new(RwLock::new(AppState::new(FsDb::new(&dbpath).unwrap())));
+        let shared_state = test_state(FsDb::new(&dbpath).unwrap());
 
         let key = CnKey::from_str("foo.bar").unwrap();
         let db = FsDb::new(&dbpath).unwrap();
@@ -645,7 +659,7 @@ mod tests {
     async fn test_tokenrequest_vs_bad_code() {
         let tempdir = tempfile::tempdir().unwrap();
         let dbpath = tempdir.path().join("db");
-        let shared_state = Arc::new(RwLock::new(AppState::new(FsDb::new(&dbpath).unwrap())));
+        let shared_state = test_state(FsDb::new(&dbpath).unwrap());
 
         let key = CnKey::from_str("foo.bar").unwrap();
         let db = FsDb::new(&dbpath).unwrap();
@@ -684,7 +698,7 @@ mod tests {
     async fn test_full_auth_path() {
         let tempdir = tempfile::tempdir().unwrap();
         let dbpath = tempdir.path().join("db");
-        let shared_state = Arc::new(RwLock::new(AppState::new(FsDb::new(&dbpath).unwrap())));
+        let shared_state = test_state(FsDb::new(&dbpath).unwrap());
 
         let key = CnKey::from_str("foo.bar").unwrap();
         let db = FsDb::new(&dbpath).unwrap();

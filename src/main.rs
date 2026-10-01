@@ -92,12 +92,20 @@ struct ServeArgs {
     /// Path to the TLS certificate file
     #[arg(long, short)]
     cert: PathBuf,
+
+    /// Path to an owner-only HMAC key file used to sign BAS access tokens
+    #[arg(long)]
+    token_key_file: PathBuf,
 }
 
 #[derive(Args)]
 struct GentokArgs {
     /// CN of the actor to generate a token for (must exist in db)
     cn: String,
+
+    /// Path to an owner-only HMAC key file used to sign BAS access tokens
+    #[arg(long)]
+    token_key_file: PathBuf,
 }
 
 fn main() {
@@ -165,18 +173,29 @@ fn main() {
             let rt = tokio::runtime::Runtime::new().unwrap();
             tracing_subscriber::fmt::init();
             rt.block_on(async {
-                start_server(&args.key, &args.cert, init_db(Path::new(DEFAULT_DB_PATH))).await;
+                start_server(
+                    &args.key,
+                    &args.cert,
+                    &args.token_key_file,
+                    init_db(Path::new(DEFAULT_DB_PATH)),
+                )
+                .await;
             });
         }
         Some(CliCommand::Gentok(args)) => {
             let db = init_db(Path::new(DEFAULT_DB_PATH));
+            let token_signing_key =
+                token::load_signing_key(&args.token_key_file).unwrap_or_else(|e| {
+                    eprintln!("Error loading token signing key: {e}");
+                    std::process::exit(1);
+                });
             let key = CnKey::from_str(&args.cn).unwrap_or_else(|e| {
                 eprintln!("Error parsing CN: {}", e);
                 std::process::exit(1);
             });
             match db.get_attributes(&key) {
                 Ok(attrs) => {
-                    let tok = create_token(key.as_str(), &attrs);
+                    let tok = create_token(key.as_str(), &attrs, &token_signing_key);
                     println!("{tok}");
                 }
                 Err(e) => {

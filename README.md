@@ -12,6 +12,20 @@ To run the server you need to create a certificate for TLS.  Eg,
 openssl req -new -newkey rsa:4096 -x509 -sha256 -days 365 -nodes -out tlscert.crt -keyout tlskey.key
 ```
 
+The Visa Service verifies BAS access tokens with a shared HMAC-SHA384 key. Generate
+one from a cryptographically secure random source and restrict it to the BAS and
+Visa Service accounts (mode `0600`):
+
+```bash
+openssl rand -out bas-token-hmac.key 48
+chmod 600 bas-token-hmac.key
+```
+
+Configure the Visa Service's matching
+`[trusted_service_http.bas].token_verification_key_file` to this same secret.
+The current `zpr-oauthrsa` flow proves possession of an adapter CN's RSA key and
+returns its mapped claims; it is not an interactive human login or session UI.
+
 
 ## Demonstration Usage
 
@@ -28,7 +42,7 @@ value attribute "groups".
 
 Start the server
 
-    ./bas serve --key certs/tlskey.key --cert certs/tlscert.crt
+    ./bas serve --key certs/tlskey.key --cert certs/tlscert.crt --token-key-file certs/bas-token-hmac.key
 
 
 Kick of authentication/authorization.  Now we are acting like an adapter.  This step will return a challange nonce

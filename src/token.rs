@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fs, io};
 
 use hmac::{Hmac, Mac};
 use jwt::{AlgorithmType, Claims, Header, SignWithKey, Token};
@@ -8,9 +10,37 @@ use sha2::Sha384;
 use uuid::Uuid;
 
 pub const JWT_LIFETIME_SECONDS: u64 = 86400; // 24 hours
+const MIN_SIGNING_KEY_LENGTH: usize = 32;
+
+/// Load a private HMAC key without exposing its contents. The file must be owner-only.
+pub fn load_signing_key(path: &Path) -> io::Result<Vec<u8>> {
+    let metadata = fs::metadata(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "BAS token signing key must not be accessible by group or other",
+            ));
+        }
+    }
+    let key = fs::read(path)?;
+    if key.len() < MIN_SIGNING_KEY_LENGTH {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "BAS token signing key must contain at least 32 bytes",
+        ));
+    }
+    Ok(key)
+}
 
 /// Returns JWT in its encoded string form.
-pub fn create_token(client_id: &str, attributes: &Vec<(String, String)>) -> String {
+pub fn create_token(
+    client_id: &str,
+    attributes: &[(String, String)],
+    signing_key: &[u8],
+) -> String {
     let mut token_claims: Claims = Claims::default();
 
     token_claims.registered.subject = Some(client_id.into());
@@ -39,9 +69,8 @@ pub fn create_token(client_id: &str, attributes: &Vec<(String, String)>) -> Stri
             .insert(format!("z/{}", tuple.0), json!(tuple.1.clone()));
     }
 
-    // TODO: In future we will sign with our private RSA key which will allow the visa service
-    //       to verify it.
-    let key: Hmac<Sha384> = Hmac::new_from_slice(b"some-secret-placeholder").unwrap();
+    let key: Hmac<Sha384> = Hmac::new_from_slice(signing_key)
+        .expect("configured BAS token signing key must not be empty");
     let header = Header {
         algorithm: AlgorithmType::Hs384,
         ..Default::default()
@@ -113,13 +142,16 @@ pub fn claims_for(tstr: &str) -> Result<BTreeMap<String, String>, jwt::Error> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    const TEST_SIGNING_KEY: &[u8] = b"test-only BAS token signing key with sufficient entropy";
 
     #[test]
     fn test_create_and_claims_for() {
         let client_id = "test_client_id";
         let attributes = vec![("key1".to_string(), "value1".to_string())];
 
-        let token = create_token(client_id, &attributes);
+        let token = create_token(client_id, &attributes, TEST_SIGNING_KEY);
         let claims = claims_for(&token).unwrap();
 
         assert_eq!(claims.get("sub").unwrap(), client_id);
@@ -133,9 +165,31 @@ mod test {
         let client_id = "test_client_id";
         let attributes = vec![("key1".to_string(), "value1".to_string())];
 
-        let token = create_token(client_id, &attributes);
+        let token = create_token(client_id, &attributes, TEST_SIGNING_KEY);
         let claims = claims_for(&token).unwrap();
 
         assert!(!claims.get("jti").unwrap().is_empty());
+    }
+
+    #[test]
+    fn signing_key_loader_requires_private_mode_and_minimum_length() {
+        let directory = tempfile::tempdir().unwrap();
+        let key_path = directory.path().join("bas-token.key");
+        std::fs::write(&key_path, TEST_SIGNING_KEY).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(load_signing_key(&key_path).unwrap(), TEST_SIGNING_KEY);
+
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(
+            load_signing_key(&key_path).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        std::fs::write(&key_path, b"short").unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            load_signing_key(&key_path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }
