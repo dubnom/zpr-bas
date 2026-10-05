@@ -7,12 +7,17 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.98.1
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt
+          rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
       - name: check warnings etc
         timeout-minutes: 5
@@ -23,6 +28,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt
+          rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
       - name: run tests
         timeout-minutes: 5
@@ -33,9 +42,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt
+          rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
       - name: build
         timeout-minutes: 5
         run: |
           make build
-
